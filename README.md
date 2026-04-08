@@ -68,6 +68,31 @@ If both webhook URL and env are empty, messages are logged to stdout instead of 
 | `alarm_webhooks` | Fallback Slack webhook URL |
 | `alarm_prefix` | Fallback message prefix |
 
+### keystore
+
+Ethereum keystore decryption with terminal password prompt.
+
+#### Install
+
+```bash
+go get github.com/mapprotocol/mapo-lib/keystore
+```
+
+#### Usage
+
+```go
+import "github.com/mapprotocol/mapo-lib/keystore"
+
+// Decrypt an Ethereum keystore file (prompts for password on first use, then caches it)
+key, err := keystore.KeypairFromEth("/path/to/keyfile.json")
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println("Address:", key.Address.Hex())
+```
+
+Password can also be set via the `KEYSTORE_PASSWORD` environment variable.
+
 ## License
 
 MIT
