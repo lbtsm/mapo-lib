@@ -93,6 +93,74 @@ fmt.Println("Address:", key.Address.Hex())
 
 Password can also be set via the `KEYSTORE_PASSWORD` environment variable.
 
+### abi
+
+Wrapper around go-ethereum's ABI with convenient helpers.
+
+#### Install
+
+```bash
+go get github.com/mapprotocol/mapo-lib/abi
+```
+
+#### Usage
+
+```go
+import mapoabi "github.com/mapprotocol/mapo-lib/abi"
+
+a, _ := mapoabi.New(erc20AbiJSON)
+
+// Pack a method call
+data, _ := a.PackInput("transfer", toAddr, amount)
+
+// Unpack method output
+var supply *big.Int
+a.UnpackOutput("totalSupply", &supply, outputBytes)
+
+// Decode raw transaction input
+methodName, values, _ := a.UnpackInputData(tx.Data())
+
+// Unpack event log
+var event TransferEvent
+a.UnpackLog(&event, "Transfer", log)
+
+// Lookup
+id, _ := a.GetMethodID("transfer")     // 4-byte selector
+topic, _ := a.GetEventID("Transfer")   // event topic hash
+a.HasMethod("approve")                 // true/false
+```
+
+### contract
+
+Read-only contract caller built on go-ethereum's ethclient.
+
+#### Install
+
+```bash
+go get github.com/mapprotocol/mapo-lib/contract
+```
+
+#### Usage
+
+```go
+import (
+    mapoabi "github.com/mapprotocol/mapo-lib/abi"
+    "github.com/mapprotocol/mapo-lib/contract"
+    "github.com/ethereum/go-ethereum/ethclient"
+)
+
+client, _ := ethclient.Dial("https://rpc.example.com")
+a, _ := mapoabi.New(abiJSON)
+c := contract.New(client, []common.Address{contractAddr}, a)
+
+// Call a view function
+var supply *big.Int
+c.Call("totalSupply", &supply, 0)
+
+// Call at a specific block
+c.CallAt(ctx, "balanceOf", &balance, 0, blockNum, addr)
+```
+
 ## License
 
 MIT
