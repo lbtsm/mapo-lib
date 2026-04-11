@@ -3,7 +3,6 @@ package alarm
 import (
 	"context"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"sync"
@@ -87,7 +86,7 @@ func (a *Alarm) Send(ctx context.Context, msg string) error {
 	text := fmt.Sprintf("%s %s", a.prefix, msg)
 
 	if a.hookURL == "" {
-		log.Printf("[alarm] %s", text)
+		fmt.Printf("[alarm] %s\n", text)
 		return nil
 	}
 

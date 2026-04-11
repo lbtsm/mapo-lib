@@ -1,4 +1,4 @@
-module github.com/mapprotocol/mapo-lib
+module github.com/lbtsm/mapo-lib
 
 go 1.25.0
 

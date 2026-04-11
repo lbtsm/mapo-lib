@@ -7,7 +7,7 @@ import (
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
-	mapoabi "github.com/mapprotocol/mapo-lib/abi"
+	mapoabi "github.com/lbtsm/mapo-lib/abi"
 )
 
 type Call struct {
