@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/slack-go/slack"
@@ -16,6 +17,12 @@ const (
 	EnvPrefix   = "alarm_prefix"
 )
 
+// Sender is the contract implemented by *Alarm. Consumers can depend on this
+// interface in their own code so they can substitute a fake in tests.
+type Sender interface {
+	Send(ctx context.Context, msg string) error
+}
+
 // Alarm sends deduplicated messages to a Slack incoming webhook.
 // Messages with the same content are suppressed for a configurable interval.
 type Alarm struct {
@@ -23,7 +30,7 @@ type Alarm struct {
 	hookURL  string
 	interval time.Duration
 
-	mu   sync.RWMutex
+	mu   sync.Mutex
 	seen map[string]int64
 }
 
@@ -38,16 +45,14 @@ func WithInterval(d time.Duration) Option {
 // New creates an Alarm with the given environment prefix and Slack webhook URL.
 // If hookURL is empty, it falls back to the alarm_webhooks environment variable.
 // If prefix is empty, it falls back to alarm_prefix env, then "unknown".
-// The local IP address is automatically appended to the prefix.
+// The local IP address is appended to the prefix lazily on first use, so New
+// itself performs no network I/O.
 func New(prefix, hookURL string, opts ...Option) *Alarm {
 	if hookURL == "" {
 		hookURL = os.Getenv(EnvWebhooks)
 	}
 	if prefix == "" {
 		prefix = os.Getenv(EnvPrefix)
-	}
-	if prefix == "" {
-		prefix = fmt.Sprintf("unknown[%s]", localIP())
 	}
 
 	a := &Alarm{
@@ -62,47 +67,102 @@ func New(prefix, hookURL string, opts ...Option) *Alarm {
 	return a
 }
 
-// defaultAlarm is the package-level default instance.
-var defaultAlarm *Alarm
+// defaultAlarm is the package-level default instance, swapped atomically so
+// concurrent Init / Send calls don't race.
+var defaultAlarm atomic.Pointer[Alarm]
 
-// Init initializes the default alarm instance. Call this once at startup.
+// Init initializes the default alarm instance. Safe to call concurrently with
+// Send; the swap is atomic.
 func Init(prefix, hookURL string, opts ...Option) {
-	defaultAlarm = New(prefix, hookURL, opts...)
+	defaultAlarm.Store(New(prefix, hookURL, opts...))
 }
 
 // Send sends a message using the default alarm instance.
 // Returns an error if Init has not been called.
 func Send(ctx context.Context, msg string) error {
-	if defaultAlarm == nil {
+	a := defaultAlarm.Load()
+	if a == nil {
 		return fmt.Errorf("alarm: default alarm not initialized, call Init first")
 	}
-	return defaultAlarm.Send(ctx, msg)
+	return a.Send(ctx, msg)
 }
 
 // Send posts a message to the configured Slack webhook.
 // Duplicate messages within the deduplication interval are silently dropped.
 // If the webhook URL is empty, the message is logged locally instead.
 func (a *Alarm) Send(ctx context.Context, msg string) error {
-	text := fmt.Sprintf("%s %s", a.prefix, msg)
+	text := fmt.Sprintf("%s %s", a.resolvedPrefix(), msg)
 
 	if a.hookURL == "" {
 		fmt.Printf("[alarm] %s\n", text)
 		return nil
 	}
 
-	now := time.Now().Unix()
-	a.mu.RLock()
-	last, ok := a.seen[msg]
-	a.mu.RUnlock()
-	if ok && now-last < int64(a.interval.Seconds()) {
+	now := time.Now().UnixNano()
+	intervalNs := a.interval.Nanoseconds()
+
+	// Single critical section: prune stale entries, check the dedup window,
+	// and reserve the slot for this message — all atomically. Reserving
+	// before the network call ensures that concurrent goroutines sending the
+	// same message see the entry and skip, so only one HTTP request goes out.
+	a.mu.Lock()
+	// Prune entries older than 2*interval. n is bounded by recent unique
+	// messages so this is fine.
+	cutoff := now - 2*intervalNs
+	for k, ts := range a.seen {
+		if ts < cutoff {
+			delete(a.seen, k)
+		}
+	}
+	if last, ok := a.seen[msg]; ok && now-last < intervalNs {
+		a.mu.Unlock()
 		return nil
 	}
-
-	a.mu.Lock()
 	a.seen[msg] = now
 	a.mu.Unlock()
 
-	return slack.PostWebhookContext(ctx, a.hookURL, &slack.WebhookMessage{Text: text})
+	if err := slack.PostWebhookContext(ctx, a.hookURL, &slack.WebhookMessage{Text: text}); err != nil {
+		// Remove the reservation so the next attempt isn't suppressed by a
+		// failure that never reached anyone.
+		a.mu.Lock()
+		// Only delete if no later success has overwritten our timestamp.
+		if a.seen[msg] == now {
+			delete(a.seen, msg)
+		}
+		a.mu.Unlock()
+		return err
+	}
+	return nil
+}
+
+// seenSize returns the number of entries currently held in the dedup map.
+// It is unexported and intended for tests.
+func (a *Alarm) seenSize() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.seen)
+}
+
+// resolvedPrefix returns the configured prefix, lazily appending the local IP
+// the first time it is needed. This keeps New() free of network I/O.
+func (a *Alarm) resolvedPrefix() string {
+	if a.prefix != "" {
+		return a.prefix
+	}
+	return fmt.Sprintf("unknown[%s]", cachedLocalIP())
+}
+
+var (
+	localIPOnce  sync.Once
+	localIPValue string
+)
+
+// cachedLocalIP resolves the preferred outbound IP once and caches the result.
+func cachedLocalIP() string {
+	localIPOnce.Do(func() {
+		localIPValue = localIP()
+	})
+	return localIPValue
 }
 
 // localIP returns the preferred outbound IP of this machine.
