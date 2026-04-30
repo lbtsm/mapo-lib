@@ -13,14 +13,16 @@ Slack webhook alarm with message deduplication.
 - Slack incoming webhook via [go-slack](https://github.com/slack-go/slack) SDK
 - Duplicate message suppression within configurable interval (default 5 min)
 - Global default instance (`Init` / `Send`) and custom instances (`New`)
+- `Sender` interface for easy mocking in consumer tests
 - Fallback to environment variables `alarm_webhooks` and `alarm_prefix`
 - Auto-appends local IP when prefix is not set
 - Graceful degradation: logs locally when webhook URL is empty
+- Thread-safe under concurrent send/init
 
 #### Install
 
 ```bash
-go get github.com/mapprotocol/mapo-lib/alarm
+go get github.com/lbtsm/mapo-lib/alarm
 ```
 
 #### Usage
@@ -28,7 +30,7 @@ go get github.com/mapprotocol/mapo-lib/alarm
 **Global instance (simple)**
 
 ```go
-import "github.com/mapprotocol/mapo-lib/alarm"
+import "github.com/lbtsm/mapo-lib/alarm"
 
 // Initialize once at startup
 alarm.Init("production", "https://hooks.slack.com/services/xxx")
@@ -70,43 +72,44 @@ If both webhook URL and env are empty, messages are logged to stdout instead of 
 
 ### keystore
 
-Ethereum keystore decryption with terminal password prompt.
+Ethereum keystore decryption with optional terminal password prompt.
 
 #### Install
 
 ```bash
-go get github.com/mapprotocol/mapo-lib/keystore
+go get github.com/lbtsm/mapo-lib/keystore
 ```
 
 #### Usage
 
 ```go
-import "github.com/mapprotocol/mapo-lib/keystore"
+import "github.com/lbtsm/mapo-lib/keystore"
 
-// Decrypt an Ethereum keystore file (prompts for password on first use, then caches it)
+// Non-interactive: pass the password directly. Suitable for servers and tests.
+key, err := keystore.KeypairFromEthWithPassword("/path/to/keyfile.json", []byte("pwd"))
+
+// Interactive: cache → KEYSTORE_PASSWORD env → terminal prompt.
 key, err := keystore.KeypairFromEth("/path/to/keyfile.json")
-if err != nil {
-    log.Fatal(err)
-}
+
 fmt.Println("Address:", key.Address.Hex())
 ```
 
-Password can also be set via the `KEYSTORE_PASSWORD` environment variable.
+The password cache is shared across calls and protected by a mutex. Failed decryption does not poison the cache.
 
 ### abi
 
-Wrapper around go-ethereum's ABI with convenient helpers.
+Wrapper around go-ethereum's ABI with convenient helpers and sentinel errors.
 
 #### Install
 
 ```bash
-go get github.com/mapprotocol/mapo-lib/abi
+go get github.com/lbtsm/mapo-lib/abi
 ```
 
 #### Usage
 
 ```go
-import mapoabi "github.com/mapprotocol/mapo-lib/abi"
+import mapoabi "github.com/lbtsm/mapo-lib/abi"
 
 a, _ := mapoabi.New(erc20AbiJSON)
 
@@ -128,6 +131,9 @@ a.UnpackLog(&event, "Transfer", log)
 id, _ := a.GetMethodID("transfer")     // 4-byte selector
 topic, _ := a.GetEventID("Transfer")   // event topic hash
 a.HasMethod("approve")                 // true/false
+
+// Sentinel errors for programmatic handling
+if errors.Is(err, mapoabi.ErrMethodNotFound) { ... }
 ```
 
 ### contract
@@ -137,15 +143,15 @@ Read-only contract caller built on go-ethereum's ethclient.
 #### Install
 
 ```bash
-go get github.com/mapprotocol/mapo-lib/contract
+go get github.com/lbtsm/mapo-lib/contract
 ```
 
 #### Usage
 
 ```go
 import (
-    mapoabi "github.com/mapprotocol/mapo-lib/abi"
-    "github.com/mapprotocol/mapo-lib/contract"
+    mapoabi "github.com/lbtsm/mapo-lib/abi"
+    "github.com/lbtsm/mapo-lib/contract"
     "github.com/ethereum/go-ethereum/ethclient"
 )
 
@@ -153,12 +159,18 @@ client, _ := ethclient.Dial("https://rpc.example.com")
 a, _ := mapoabi.New(abiJSON)
 c := contract.New(client, []common.Address{contractAddr}, a)
 
-// Call a view function
+// Preferred: address-based call
 var supply *big.Int
+c.CallContract(ctx, contractAddr, "totalSupply", &supply)
+
+// Index-based call (legacy, bounds-checked — returns ErrIndexOutOfRange on bad idx)
 c.Call("totalSupply", &supply, 0)
 
 // Call at a specific block
 c.CallAt(ctx, "balanceOf", &balance, 0, blockNum, addr)
+
+// Set the From address used in CallMsg
+c2 := contract.New(client, addrs, a, contract.WithFrom(myAddr))
 ```
 
 ## License
