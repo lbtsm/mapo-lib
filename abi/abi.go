@@ -1,12 +1,22 @@
 package abi
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+)
+
+// Sentinel errors. Wrapped with %w so callers can use errors.Is.
+var (
+	ErrMethodNotFound = errors.New("method not found")
+	ErrEventNotFound  = errors.New("event not found")
+	// ErrMissingTopics is returned by UnpackLog when a log lacks the topics
+	// required to decode the event's indexed fields.
+	ErrMissingTopics = errors.New("log is missing required topics")
 )
 
 type Abi struct {
@@ -28,21 +38,21 @@ func (a *Abi) ABI() abi.ABI {
 }
 
 // PackInput packs a method call with the given parameters.
-func (a *Abi) PackInput(method string, params ...interface{}) ([]byte, error) {
+func (a *Abi) PackInput(method string, params ...any) ([]byte, error) {
 	return a.abi.Pack(method, params...)
 }
 
 // UnpackInput unpacks the input data of a method call (without the 4-byte selector).
-func (a *Abi) UnpackInput(method string, data []byte) ([]interface{}, error) {
+func (a *Abi) UnpackInput(method string, data []byte) ([]any, error) {
 	m, ok := a.abi.Methods[method]
 	if !ok {
-		return nil, fmt.Errorf("method %s not found", method)
+		return nil, fmt.Errorf("%w: %s", ErrMethodNotFound, method)
 	}
 	return m.Inputs.Unpack(data)
 }
 
 // UnpackInputData unpacks transaction input data (with the 4-byte selector).
-func (a *Abi) UnpackInputData(data []byte) (string, []interface{}, error) {
+func (a *Abi) UnpackInputData(data []byte) (string, []any, error) {
 	if len(data) < 4 {
 		return "", nil, fmt.Errorf("data too short: %d bytes", len(data))
 	}
@@ -58,10 +68,10 @@ func (a *Abi) UnpackInputData(data []byte) (string, []interface{}, error) {
 }
 
 // UnpackOutput unpacks the output of a method call into the given struct or variable.
-func (a *Abi) UnpackOutput(method string, ret interface{}, output []byte) error {
+func (a *Abi) UnpackOutput(method string, ret any, output []byte) error {
 	m, ok := a.abi.Methods[method]
 	if !ok {
-		return fmt.Errorf("method %s not found", method)
+		return fmt.Errorf("%w: %s", ErrMethodNotFound, method)
 	}
 	unpack, err := m.Outputs.Unpack(output)
 	if err != nil {
@@ -74,28 +84,32 @@ func (a *Abi) UnpackOutput(method string, ret interface{}, output []byte) error 
 }
 
 // UnpackOutputValues unpacks the output of a method call into a list of values.
-func (a *Abi) UnpackOutputValues(method string, output []byte) ([]interface{}, error) {
+func (a *Abi) UnpackOutputValues(method string, output []byte) ([]any, error) {
 	m, ok := a.abi.Methods[method]
 	if !ok {
-		return nil, fmt.Errorf("method %s not found", method)
+		return nil, fmt.Errorf("%w: %s", ErrMethodNotFound, method)
 	}
 	return m.Outputs.Unpack(output)
 }
 
 // UnpackEventValues unpacks event data (non-indexed fields) into a list of values.
-func (a *Abi) UnpackEventValues(event string, data []byte) ([]interface{}, error) {
+func (a *Abi) UnpackEventValues(event string, data []byte) ([]any, error) {
 	e, ok := a.abi.Events[event]
 	if !ok {
-		return nil, fmt.Errorf("event %s not found", event)
+		return nil, fmt.Errorf("%w: %s", ErrEventNotFound, event)
 	}
 	return e.Inputs.UnpackValues(data)
 }
 
 // UnpackLog unpacks a log entry into the given struct.
-func (a *Abi) UnpackLog(out interface{}, event string, log types.Log) error {
+//
+// The log's first topic (if present) is the event signature; the remaining
+// topics carry indexed arguments. Empty/missing topics on an event with
+// indexed args yields ErrMissingTopics rather than a panic.
+func (a *Abi) UnpackLog(out any, event string, log types.Log) error {
 	e, ok := a.abi.Events[event]
 	if !ok {
-		return fmt.Errorf("event %s not found", event)
+		return fmt.Errorf("%w: %s", ErrEventNotFound, event)
 	}
 	// unpack non-indexed fields from data
 	if len(log.Data) > 0 {
@@ -103,12 +117,20 @@ func (a *Abi) UnpackLog(out interface{}, event string, log types.Log) error {
 			return fmt.Errorf("unpack log data: %w", err)
 		}
 	}
-	// unpack indexed fields from topics
+	// gather indexed arguments
 	var indexed abi.Arguments
 	for _, arg := range e.Inputs {
 		if arg.Indexed {
 			indexed = append(indexed, arg)
 		}
+	}
+	if len(indexed) == 0 {
+		return nil
+	}
+	// We need topics[0] (signature) plus one topic per indexed arg.
+	if len(log.Topics) < 1+len(indexed) {
+		return fmt.Errorf("%w: have %d, need %d for event %s",
+			ErrMissingTopics, len(log.Topics), 1+len(indexed), event)
 	}
 	if err := abi.ParseTopics(out, indexed, log.Topics[1:]); err != nil {
 		return fmt.Errorf("parse indexed topics: %w", err)
@@ -120,7 +142,7 @@ func (a *Abi) UnpackLog(out interface{}, event string, log types.Log) error {
 func (a *Abi) GetMethodID(method string) ([]byte, error) {
 	m, ok := a.abi.Methods[method]
 	if !ok {
-		return nil, fmt.Errorf("method %s not found", method)
+		return nil, fmt.Errorf("%w: %s", ErrMethodNotFound, method)
 	}
 	return m.ID, nil
 }
@@ -129,7 +151,7 @@ func (a *Abi) GetMethodID(method string) ([]byte, error) {
 func (a *Abi) GetEventID(event string) (common.Hash, error) {
 	e, ok := a.abi.Events[event]
 	if !ok {
-		return common.Hash{}, fmt.Errorf("event %s not found", event)
+		return common.Hash{}, fmt.Errorf("%w: %s", ErrEventNotFound, event)
 	}
 	return e.ID, nil
 }
